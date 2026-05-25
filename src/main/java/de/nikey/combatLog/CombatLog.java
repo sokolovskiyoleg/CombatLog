@@ -4,8 +4,10 @@ import de.nikey.combatLog.Combat.CombatManager;
 import de.nikey.combatLog.Command.CombatLogCommand;
 import de.nikey.combatLog.Config.PluginConfig;
 import de.nikey.combatLog.Listener.*;
+import de.nikey.combatLog.Utils.CombatPlaceholders;
 import de.nikey.combatLog.Utils.Metrics;
 import de.nikey.combatLog.Utils.ModrinthUpdateChecker;
+import de.nikey.combatLog.Utils.SafeZoneBarrierManager;
 import de.nikey.combatLog.Utils.WorldGuardBridge;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
@@ -31,7 +33,7 @@ public final class CombatLog extends JavaPlugin {
         }
     }
 
-    // Isolated – WorldGuardHook class only loaded when this method runs
+    // Isolated - WorldGuardHook class only loaded when this method runs
     private void initWorldGuard() {
         de.nikey.combatLog.Utils.WorldGuardHook hook =
                 new de.nikey.combatLog.Utils.WorldGuardHook(this);
@@ -44,12 +46,12 @@ public final class CombatLog extends JavaPlugin {
         saveDefaultConfig();
         ensureMessageResourcesExist();
 
-        FileConfiguration messagesConfig = loadMessagesConfig();
-        pluginConfig = new PluginConfig(getConfig(), messagesConfig);
+        pluginConfig = new PluginConfig(getConfig(), loadMessagesConfig());
         combatManager = new CombatManager(this, pluginConfig);
 
         registerListeners(pluginConfig);
         registerCommands();
+        registerPlaceholders();
 
         new ModrinthUpdateChecker("LI8sodAD").checkForUpdates();
         new Metrics(this, 28071);
@@ -81,10 +83,23 @@ public final class CombatLog extends JavaPlugin {
         command.setTabCompleter(executor);
     }
 
-    // Isolated – WorldGuardListener class only loaded when this method runs
+    // Isolated - CombatPlaceholders (and PlaceholderExpansion) never loaded when PAPI is absent
+    private void registerPlaceholders() {
+        if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") == null) return;
+        initPlaceholders();
+    }
+
+    private void initPlaceholders() {
+        new CombatPlaceholders(combatManager).register();
+        getLogger().info("PlaceholderAPI detected: placeholders registered.");
+    }
+
+    // Isolated - WorldGuardListener and SafeZoneBarrierManager only loaded when WorldGuard is present
     private void registerWorldGuardListener(PluginManager pm, PluginConfig config) {
+        SafeZoneBarrierManager barrierManager = new SafeZoneBarrierManager(config);
+        combatManager.setBarrierManager(barrierManager);
         pm.registerEvents(
-                new de.nikey.combatLog.Listener.WorldGuardListener(combatManager, config), this);
+                new de.nikey.combatLog.Listener.WorldGuardListener(combatManager, config, barrierManager), this);
     }
 
     public static boolean isWorldGuardEnabled() {
@@ -112,6 +127,11 @@ public final class CombatLog extends JavaPlugin {
         File localizedFile = new File(getDataFolder(), "messages-" + language + ".yml");
 
         if (!localizedFile.exists()) {
+            File legacyMessagesFile = new File(getDataFolder(), "messages.yml");
+            if (legacyMessagesFile.exists()) {
+                return YamlConfiguration.loadConfiguration(legacyMessagesFile);
+            }
+
             if (!"en".equals(language)) {
                 getLogger().warning("Missing messages file for language '" + language + "', falling back to messages-en.yml");
             }
@@ -124,6 +144,7 @@ public final class CombatLog extends JavaPlugin {
     private void ensureMessageResourcesExist() {
         saveMessageResourceIfMissing("messages-en.yml");
         saveMessageResourceIfMissing("messages-ru.yml");
+        saveMessageResourceIfMissing("messages.yml");
     }
 
     private void saveMessageResourceIfMissing(String resourceName) {

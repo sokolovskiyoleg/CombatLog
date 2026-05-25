@@ -15,7 +15,7 @@ combat-log:
       disabled-in-combat: true
     riptide:
       stop: false
-      cooldown: 10000                    # riptide cooldown (sec * 100)
+      cooldown: 10000                    # riptide cooldown (ms)
     explosions:
       set-combat-on-explosion: true      # End crystals + block explosions set combat
 
@@ -46,6 +46,24 @@ combat-log:
   combat-zone:
     enabled: false
     radius: 10
+
+  # =========================
+  # Potion effects on combat tag
+  # =========================
+  tag-effects:
+    # - type: SLOWNESS
+    #   duration-seconds: 15
+    #   amplifier: 0
+    #   show-particles: true
+
+  # =========================
+  # WorldGuard integration
+  # =========================
+  worldguard:
+    safe-zone-barrier:
+      enabled: true                      # Show visual barrier at safe zone borders
+      material: RED_STAINED_GLASS        # Any valid Material name (e.g. BARRIER, BLUE_STAINED_GLASS)
+      radius: 1                          # Radius of fake blocks shown around the boundary (in blocks)
 
 messages:
   language: en

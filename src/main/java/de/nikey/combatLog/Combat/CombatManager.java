@@ -2,26 +2,34 @@ package de.nikey.combatLog.Combat;
 
 import de.nikey.combatLog.CombatLog;
 import de.nikey.combatLog.Config.PluginConfig;
+import de.nikey.combatLog.Utils.SafeZoneBarrierManager;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
 import org.bukkit.entity.Player;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.UUID;
 
 /**
- * Owns all combat state (timers, boss bars) and exposes a clean API
+ * Owns all combat state (timers, boss bars, applied effects) and exposes a clean API
  * for tagging/untagging players. Listeners never touch the maps directly.
  */
 public class CombatManager {
 
     private final CombatLog plugin;
     private final PluginConfig config;
+    private SafeZoneBarrierManager barrierManager;
 
     /** Remaining seconds for each player in combat. */
     private final Map<UUID, Integer> combatTimers = new HashMap<>();
@@ -29,16 +37,32 @@ public class CombatManager {
     private final Map<UUID, BukkitRunnable> activeTimers = new HashMap<>();
     /** Active boss bars per player. */
     private final Map<UUID, BossBar> bossBars = new HashMap<>();
+    /** Potion effect types applied by CombatLog — removed on untag. */
+    private final Map<UUID, List<PotionEffectType>> appliedEffects = new HashMap<>();
 
     public CombatManager(CombatLog plugin, PluginConfig config) {
         this.plugin = plugin;
         this.config = config;
     }
 
+    /** Injected after construction so WorldGuard stays optional. */
+    public void setBarrierManager(SafeZoneBarrierManager barrierManager) {
+        this.barrierManager = barrierManager;
+    }
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     public boolean isInCombat(Player player) {
         return combatTimers.containsKey(player.getUniqueId());
+    }
+
+    public int activeCombatCount() {
+        return combatTimers.size();
+    }
+
+    public OptionalInt getRemainingCombatSeconds(Player player) {
+        Integer timeLeft = combatTimers.get(player.getUniqueId());
+        return timeLeft == null ? OptionalInt.empty() : OptionalInt.of(timeLeft);
     }
 
     /**
@@ -58,13 +82,15 @@ public class CombatManager {
             return;
         }
 
+        // First tag only
         notifyAfkIfNeeded(player);
+        applyTagEffects(player);
         combatTimers.put(id, duration);
         scheduleTimerTask(player, duration);
     }
 
     /**
-     * Convenience: untag both, then tag both, and stop gliding.
+     * Convenience: untag both, then tag both.
      */
     public void tagBoth(Player a, Player b) {
         untag(a);
@@ -73,18 +99,21 @@ public class CombatManager {
         tag(b);
     }
 
-    /** Removes a player from combat and cancels their timer/bossbar. */
+    /** Removes a player from combat and cancels their timer/bossbar/effects. */
     public void untag(Player player) {
+        clearBarriers(player);
         cleanup(player.getUniqueId());
     }
 
     /** Called on plugin shutdown – cancels all running tasks cleanly. */
     public void shutdown() {
+        if (barrierManager != null) barrierManager.clearAll();
         activeTimers.values().forEach(BukkitRunnable::cancel);
         activeTimers.clear();
         combatTimers.clear();
         bossBars.forEach((id, bar) -> Bukkit.getOnlinePlayers().forEach(bar::removeViewer));
         bossBars.clear();
+        appliedEffects.clear();
     }
 
     public int activeCombatCount() {
@@ -97,6 +126,12 @@ public class CombatManager {
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
+
+    private void clearBarriers(Player player) {
+        if (barrierManager != null) {
+            barrierManager.clearBarrier(player);
+        }
+    }
 
     private void scheduleTimerTask(Player player, int duration) {
         UUID id = player.getUniqueId();
@@ -112,6 +147,7 @@ public class CombatManager {
             @Override
             public void run() {
                 if (!player.isValid()) {
+                    clearBarriers(player);
                     cleanup(id);
                     cancel();
                     return;
@@ -119,6 +155,7 @@ public class CombatManager {
 
                 Integer timeLeft = combatTimers.get(id);
                 if (timeLeft == null) {
+                    clearBarriers(player);
                     cleanup(id);
                     cancel();
                     return;
@@ -128,6 +165,7 @@ public class CombatManager {
                     combatTimers.put(id, timeLeft - 1);
                     updateDisplay(player, id, displayType, timeLeft, duration);
                 } else {
+                    clearBarriers(player);
                     cleanup(id);
                     cancel();
                 }
@@ -165,6 +203,38 @@ public class CombatManager {
 
         BossBar bar = bossBars.remove(id);
         if (bar != null) Bukkit.getOnlinePlayers().forEach(bar::removeViewer);
+
+        // Only remove effects that CombatLog itself applied
+        Player player = Bukkit.getPlayer(id);
+        List<PotionEffectType> applied = appliedEffects.remove(id);
+        if (player != null && applied != null) {
+            applied.forEach(player::removePotionEffect);
+        }
+    }
+
+    private void applyTagEffects(Player player) {
+        List<PluginConfig.PotionEffectEntry> effects = config.combatTagEffects();
+        if (effects.isEmpty()) return;
+
+        List<PotionEffectType> appliedTypes = new ArrayList<>();
+
+        for (PluginConfig.PotionEffectEntry entry : effects) {
+            NamespacedKey key = NamespacedKey.minecraft(entry.type().toLowerCase());
+            PotionEffectType type = Registry.EFFECT.get(key);
+            if (type == null) {
+                plugin.getLogger().warning("Unknown potion effect in config: " + entry.type());
+                continue;
+            }
+            if (player.hasPotionEffect(type)) continue;
+
+            int durationTicks = entry.durationSeconds() * 20;
+            player.addPotionEffect(new PotionEffect(type, durationTicks, entry.amplifier(), true, entry.showParticles()));
+            appliedTypes.add(type);
+        }
+
+        if (!appliedTypes.isEmpty()) {
+            appliedEffects.put(player.getUniqueId(), appliedTypes);
+        }
     }
 
     private void notifyAfkIfNeeded(Player player) {
